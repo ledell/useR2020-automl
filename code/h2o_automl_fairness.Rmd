@@ -1,0 +1,135 @@
+---
+title: "H2O AutoML: Disparate Impact Analysis"
+output: html_notebook
+---
+
+
+```{r setup}
+library(h2o)
+library(here)
+library(R.utils)
+source(here("h2o_fairness_utils.R"))
+h2o.no_progress()  # Shut off progress bars for notebook
+```
+
+This demo uses new h2o fairness utility functions which are not currently part of the h2o package, and so they are provided in the `h2o_fairness_utils.R` script and loaded here.
+
+The [Home Mortgage Disclosure Act (HMDA)](https://en.wikipedia.org/wiki/Home_Mortgage_Disclosure_Act) is a United States federal law that requires certain financial institutions to maintain, report, and publicly disclose loan-level information about mortgages. These data help show whether lenders are serving the housing needs of their communities; they give public officials information that helps them make decisions and policies; and they shed light on lending patterns that could be discriminatory. The public data are modified to protect applicant and borrower privacy.
+
+The mortgage dataset analyzed here is a random sample of consumer-anonymized loans from the
+[HMDA database](https://www.consumerfinance.gov/data-research/hmda/). These loans are a subset of all originated mortgage loans in the 2018 HMDA data that
+were chosen to represent a relatively comparable group of consumer mortgages.
+
+Let's start up the H2O cluster and load the data to get started. 
+
+```{r paged.print=FALSE}
+# Start the H2O cluster
+h2o.init(ip = "127.0.0.1")
+
+# Use local data file or get from S3
+csv_file <- "hmda_lar_2018_orig_mtg_sample-singleMF-rm-rare.csv"
+data_path <- here("data", csv_file)
+if (!file.exists(data_path)) {
+  data_path <- paste0("https://erin-data.s3.amazonaws.com/misc/", csv_file)
+} 
+df <- h2o.importFile(data_path)
+```
+
+A selection of features is used to predict whether a loan is __high-priced__, which is defined as whether the annual percentage rate (APR) charged was 150 basis points (1.5%) or more above a survey-based estimate of other similar loans offered around the time of the given loan. 
+
+While lenders would almost certainly use more information than the selected features to determine whether to offer and originate a high-priced loan, the selected input features (loan to value (LTV) ratio, debt to income (DTI) ratio, property value, loan amount, introductory interest rate, customer income, etc.) are likely to be some of the most influential factors that a lender would consider.
+
+
+Take a quick look at the ethnicity, race and sex fields:
+
+```{r paged.print=FALSE}
+ethnicities <- h2o.table(df$derived_ethnicity)
+print(ethnicities, n = nrow(ethnicities))
+races <- h2o.table(df$derived_race)
+print(races, n = nrow(races))
+sexes <- h2o.table(df$derived_sex)
+print(sexes, n = nrow(sexes))
+```
+
+
+When training machine learning models, we don't want to include race, ethnicity, sex or age because those are ["protected" variables in mortgage lending](https://www.consumer.ftc.gov/articles/0188-mortgage-discrimination#:~:text=Two%20federal%20laws%2C%20the%20Equal,from%20a%20public%20assistance%20program).  We define the response column, `y` and the predictor variables, `x`.
+
+```{r paged.print=FALSE}
+# Response (1 = "bad", 0 = "good")
+y <- "high_priced"
+
+# Predictors columns
+x <- c("loan_amount",
+       "loan_to_value_ratio",
+       "loan_term",
+       "property_value",
+       "income",
+       "debt_to_income_ratio")
+
+# Convert response column to a factor (to enable classification)
+df[,y] <- as.factor(df[,y])
+```
+
+
+Split the data into a train and test set:
+
+```{r paged.print=FALSE}
+splits <- h2o.splitFrame(df, ratios = 0.8, seed = 1)
+train <- splits[[1]]
+test <- splits[[2]]
+```
+
+
+Next, we execute H2O AutoML and print the leaderboard:
+
+```{r paged.print=FALSE}
+aml <- h2o.automl(x = x, 
+                  y = y, 
+                  training_frame = train, 
+                  max_models = 10, 
+                  seed = 1)
+lb <- aml@leaderboard
+print(lb, n = nrow(lb))
+```
+
+Once we have trained a few models with AutoML, we can do a Disparate Impact Analysis.  Pass along the protected attributes (columns) that you'd like to consider.  If no reference groups are defined via the `reference_groups` argument, then all subgroups will be considered.  In our example, that means that we consider all subgroups of sex and race (e.g. Asian-female, Black-male, White-female, etc).
+
+```{r paged.print=FALSE}
+da <- h2o.get_disparate_analysis(aml = aml, 
+                                 newdata = test, 
+                                 columns = c("derived_sex", "derived_race"), 
+                                 favorable_class = "0")
+da
+```
+
+The function returns an extended AutoML leaderboard with a number of extra columns related to adverse impact and marginal effect.  Next we can look at the disparate impact across all subgroups for a single model (in this case, the "leader" model).
+
+```{r paged.print=FALSE}
+# Calculate adverse impact (binary indicator) across subgroups for just the leader model
+dm <- calculate_disparate_measures(model = aml@leader,
+                                   newdata = test,
+                                   columns = c("derived_sex", "derived_race"),
+                                   favorable_class = "0")
+dm
+```
+
+A note about the reference groups -- we look for the worst case scenario and compare against that.  AIR is a ratio of protected vs reference. So in this example, we pick the group with greatest value for reference. In this example Asian-male better off than White-male.  The biggest disparity is between Black-female vs. Asian-male (which has the lowest AIR value).
+
+To look at the disparate measures for another model on the leaderboard, just reference the model by ID as follows:
+
+```{r paged.print=FALSE}
+# Get AutoML model IDs
+model_ids <- as.data.frame(aml@leaderboard$model_id)[,1]
+
+# Calculate adverse impact (binary indicator) across subgroups for another model
+# Model #3 on the leaderboard is an XGBoost model
+dm_3 <- calculate_disparate_measures(model = h2o.getModel(model_ids[3]),
+                                     newdata = test,
+                                     columns = c("derived_sex", "derived_race"),
+                                     favorable_class = "0")
+dm_3
+```
+
+
+
+
