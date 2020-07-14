@@ -10,4 +10,4 @@
 
 📓 [Slides](https://github.com/ledell/useR2020-automl/blob/master/useR2020_responsible_automl_july2020.pdf)
 
-👩‍💻 Demo: `code/h2o_automl_fairness.Rmd`
+👩‍💻 Demo: [`code/h2o_automl_fairness.Rmd`](https://github.com/ledell/useR2020-automl/blob/master/code/h2o_automl_fairness.Rmd)
